@@ -241,6 +241,20 @@ export default function App() {
 
   // Process documents
   const processDocuments = async () => {
+    // Validation before processing
+    if (Object.keys(sourceFiles).length === 0) {
+      addLog('❌ Error: No PDF files uploaded. Please upload at least one PDF file.');
+      return;
+    }
+
+    if (singlePdfMode) {
+      const pendingRows = excelData.filter(row => row.source_file === '__PENDING__');
+      if (pendingRows.length > 0) {
+        addLog('❌ Error: PDF not assigned to pages. Please upload a PDF file first.');
+        return;
+      }
+    }
+
     setProcessing(true);
     setProgress(0);
     setLogs([]);
@@ -383,7 +397,18 @@ export default function App() {
               <Card className="p-4">
                 <div className="flex justify-between items-center">
                   <p className="text-sm text-slate-600">
-                    Loaded {excelData.length} documents • {Object.keys(sourceFiles).length} PDFs • {matchedRows} matched
+                    {singlePdfMode ? (
+                      <>
+                        Loaded {excelData.length} pages •
+                        {Object.keys(sourceFiles).length > 0
+                          ? ` PDF assigned (${Object.keys(sourceFiles)[0]})`
+                          : ' Waiting for PDF upload'}
+                      </>
+                    ) : (
+                      <>
+                        Loaded {excelData.length} documents • {Object.keys(sourceFiles).length} PDFs • {matchedRows} matched
+                      </>
+                    )}
                   </p>
                   {currentMappings && (
                     <Badge variant="info">
@@ -398,7 +423,7 @@ export default function App() {
             <div className="flex justify-end">
               <Button
                 onClick={() => setActiveStep(2)}
-                disabled={!excelFile || Object.keys(sourceFiles).length === 0 || excelData.length === 0}
+                disabled={!excelFile || excelData.length === 0}
               >
                 Configure Settings →
               </Button>
@@ -409,6 +434,22 @@ export default function App() {
         {/* Step 2: Configure */}
         {activeStep === 2 && (
           <div className="space-y-6 max-w-3xl mx-auto">
+            {/* Warning if PDF not uploaded in single PDF mode */}
+            {singlePdfMode && Object.keys(sourceFiles).length === 0 && (
+              <Card className="p-4 bg-orange-50 border-orange-200">
+                <div className="flex items-start gap-3">
+                  <span className="text-2xl">⚠️</span>
+                  <div>
+                    <h4 className="font-semibold text-orange-900">PDF Not Uploaded Yet</h4>
+                    <p className="text-sm text-orange-800 mt-1">
+                      You can configure settings now, but you'll need to upload your PDF before running the automation.
+                      Go back to Step 1 to upload your PDF file.
+                    </p>
+                  </div>
+                </div>
+              </Card>
+            )}
+
             <Card className="p-6">
               <h3 className="text-lg font-semibold mb-4">{LABELS.configStep.title}</h3>
 
