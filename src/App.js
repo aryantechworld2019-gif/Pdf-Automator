@@ -180,15 +180,30 @@ export default function App() {
     let normalizedData;
 
     if (isSinglePdfMode) {
-      // Single PDF mode: Don't filter by source_file (will be added when PDF is uploaded)
-      normalizedData = data.map(row => {
-        const normalized = normalizeRowWithCustomMappings(row, mappings);
-        // Set temporary source_file to prevent filtering
-        if (!normalized.source_file) {
-          normalized.source_file = '__PENDING__';
-        }
-        return normalized;
-      });
+      // Single PDF mode: Check if PDF already uploaded (PDF uploaded before Excel)
+      const uploadedPdfs = Object.keys(sourceFiles);
+
+      if (uploadedPdfs.length > 0) {
+        // Auto-assign the first uploaded PDF to all rows
+        const pdfFilename = uploadedPdfs[0];
+        normalizedData = data.map(row => {
+          const normalized = normalizeRowWithCustomMappings(row, mappings);
+          if (!normalized.source_file) {
+            normalized.source_file = pdfFilename;
+          }
+          return normalized;
+        });
+        addLog(`✓ Auto-assigned "${pdfFilename}" to all ${normalizedData.length} pages`);
+      } else {
+        // No PDF uploaded yet, set to __PENDING__
+        normalizedData = data.map(row => {
+          const normalized = normalizeRowWithCustomMappings(row, mappings);
+          if (!normalized.source_file) {
+            normalized.source_file = '__PENDING__';
+          }
+          return normalized;
+        });
+      }
     } else {
       // Normal mode: Filter rows without source_file
       normalizedData = data
@@ -222,17 +237,26 @@ export default function App() {
 
     setSourceFiles(newFiles);
 
-    // Single PDF mode: Auto-assign PDF filename to all rows
-    if (singlePdfMode && results.length === 1 && excelData.length > 0) {
+    // Single PDF mode: Auto-assign PDF filename to all rows with __PENDING__
+    if (singlePdfMode && excelData.length > 0) {
+      // Use the first uploaded PDF (in this batch or overall)
       const pdfFilename = results[0].name;
-      const updatedData = excelData.map(row => ({
-        ...row,
-        source_file: row.source_file === '__PENDING__' ? pdfFilename : row.source_file
-      }));
-      setExcelData(updatedData);
-      addLog(`✓ Single PDF mode: Assigned "${pdfFilename}" to all ${updatedData.length} pages`);
-    } else if (singlePdfMode && results.length > 1) {
-      addLog(`⚠️  Warning: In single PDF mode, expected 1 PDF but got ${results.length}`);
+
+      const pendingRows = excelData.filter(row => row.source_file === '__PENDING__');
+
+      if (pendingRows.length > 0) {
+        // Update all __PENDING__ rows with the PDF filename
+        const updatedData = excelData.map(row => ({
+          ...row,
+          source_file: row.source_file === '__PENDING__' ? pdfFilename : row.source_file
+        }));
+        setExcelData(updatedData);
+        addLog(`✓ Single PDF mode: Auto-assigned "${pdfFilename}" to all ${pendingRows.length} pages`);
+      }
+
+      if (results.length > 1) {
+        addLog(`ℹ️  Note: In single PDF mode, using "${pdfFilename}" (first PDF)`);
+      }
       addLog(`✓ Added ${results.length} PDF(s)`);
     } else {
       addLog(`✓ Added ${results.length} PDF(s)`);
