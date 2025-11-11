@@ -1,11 +1,17 @@
 /**
  * Excel Parser Service
  * Handles Excel file reading and data normalization
+ * NEW: Supports page range expansion (e.g., "3-5" → 3, 4, 5)
  */
 
 import * as XLSX from 'xlsx';
 import { normalizeRow, validateRow } from '../config/columnMappings';
 import { APP_CONFIG } from '../config/appConfig';
+import {
+  hasPageRanges,
+  expandAllPageRanges,
+  getPageRangeStats
+} from '../utils/pageRangeParser';
 
 /**
  * Parse Excel file from base64 data
@@ -26,13 +32,51 @@ export async function parseExcelFile(base64Data, fileName) {
     const workbook = XLSX.read(bytes, { type: 'array' });
     const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
-    const rawData = XLSX.utils.sheet_to_json(worksheet);
+    let rawData = XLSX.utils.sheet_to_json(worksheet);
 
-    // Check row limit
+    // Check row limit before expansion
     if (rawData.length > APP_CONFIG.limits.maxExcelRows) {
       return {
         success: false,
         error: `Excel file contains ${rawData.length} rows, exceeding limit of ${APP_CONFIG.limits.maxExcelRows}`,
+        data: [],
+        stats: {}
+      };
+    }
+
+    // Detect and expand page ranges (NEW!)
+    let expandedFromRanges = false;
+    let originalRowCount = rawData.length;
+    let rangeStats = null;
+
+    // Try to detect page number columns (check common variations)
+    const possiblePageColumns = ['Page Number', 'page_number', 'page', 'Page', 'pg', 'Pg'];
+    let pageColumnName = null;
+
+    if (rawData.length > 0) {
+      const firstRow = rawData[0];
+      for (const colName of possiblePageColumns) {
+        if (firstRow.hasOwnProperty(colName)) {
+          pageColumnName = colName;
+          break;
+        }
+      }
+    }
+
+    // If page ranges detected, expand them
+    if (pageColumnName && hasPageRanges(rawData, pageColumnName)) {
+      console.log(`📊 Page ranges detected! Expanding...`);
+      rangeStats = getPageRangeStats(rawData, pageColumnName);
+      rawData = expandAllPageRanges(rawData, pageColumnName);
+      expandedFromRanges = true;
+      console.log(`✨ Expanded ${originalRowCount} rows → ${rawData.length} rows`);
+    }
+
+    // Check row limit after expansion
+    if (rawData.length > APP_CONFIG.limits.maxExcelRows) {
+      return {
+        success: false,
+        error: `After expanding page ranges: ${rawData.length} rows, exceeding limit of ${APP_CONFIG.limits.maxExcelRows}`,
         data: [],
         stats: {}
       };
@@ -76,7 +120,10 @@ export async function parseExcelFile(base64Data, fileName) {
       stats,
       validationIssues,
       fileName,
-      rowCount: normalizedData.length
+      rowCount: normalizedData.length,
+      expandedFromRanges,
+      originalRowCount: expandedFromRanges ? originalRowCount : normalizedData.length,
+      rangeStats
     };
 
   } catch (error) {

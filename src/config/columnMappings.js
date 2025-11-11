@@ -37,6 +37,9 @@ export const COLUMN_MAPPINGS = {
   date: [
     'date',
     'Date',
+    'Date (MM/DD/',
+    'Date (MM/DD/YYYY)',
+    'Date (MM/DD/YY)',
     'trade_date',
     'Trade Date',
     'document_date',
@@ -67,6 +70,10 @@ export const COLUMN_MAPPINGS = {
   type: [
     'type',
     'Type',
+    'Document Title',
+    'Document Title (As per Image)',
+    'Title',
+    'title',
     'trade_type',
     'Trade Type',
     'document_type',

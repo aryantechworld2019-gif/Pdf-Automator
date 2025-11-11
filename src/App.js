@@ -44,6 +44,9 @@ export default function App() {
   const [showMappingModal, setShowMappingModal] = useState(false);
   const [currentMappings, setCurrentMappings] = useState(null);
 
+  // Single PDF mode (when Excel doesn't have source_file column)
+  const [singlePdfMode, setSinglePdfMode] = useState(false);
+
   // Auto-save settings
   useEffect(() => {
     saveSettings(config);
@@ -94,7 +97,15 @@ export default function App() {
     if (!result) return;
 
     try {
-      // Parse raw Excel data
+      // Use the enhanced Excel parser (with page range expansion!)
+      const parseResult = await parseExcelFile(result.data, result.name);
+
+      if (!parseResult.success) {
+        addLog(`❌ Error: ${parseResult.error}`);
+        return;
+      }
+
+      // Parse raw Excel data for column mapping
       const binaryString = atob(result.data);
       const bytes = new Uint8Array(binaryString.length);
       for (let i = 0; i < binaryString.length; i++) {
@@ -104,30 +115,51 @@ export default function App() {
       const wb = XLSX.read(bytes, { type: 'array' });
       const wsname = wb.SheetNames[0];
       const ws = wb.Sheets[wsname];
-      const data = XLSX.utils.sheet_to_json(ws);
+      const rawData = XLSX.utils.sheet_to_json(ws);
 
-      if (data.length === 0) {
+      if (rawData.length === 0) {
         addLog('❌ Error: Excel file is empty');
         return;
       }
 
-      // Store raw data
-      setRawExcelData(data);
+      // Store raw data (before expansion)
+      setRawExcelData(rawData);
       setExcelFile({ name: result.name });
 
+      // Show range expansion info
+      if (parseResult.expandedFromRanges) {
+        addLog(`📊 Page ranges detected and expanded!`);
+        addLog(`   Original rows: ${parseResult.originalRowCount}`);
+        addLog(`   Expanded rows: ${parseResult.rowCount}`);
+        if (parseResult.rangeStats) {
+          addLog(`   Ranges: ${parseResult.rangeStats.ranges}, Single pages: ${parseResult.rangeStats.singles}`);
+        }
+      }
+
       // Try auto-mapping
-      const firstRow = data[0];
+      const firstRow = rawData[0];
       const columns = detectExcelColumns(firstRow);
       const autoMapped = autoMapColumns(columns);
 
-      // If all required fields are auto-mapped, proceed directly
-      const requiredFields = ['sourceFile', 'pageNumber', 'date', 'type'];
+      // Check if source file is missing (single PDF mode)
+      const hasSourceFile = autoMapped.sourceFile !== undefined;
+
+      // Required fields - source_file is optional if we're in single PDF mode
+      const requiredFields = hasSourceFile
+        ? ['sourceFile', 'pageNumber', 'date', 'type']
+        : ['pageNumber', 'date', 'type'];
+
       const allMapped = requiredFields.every(field => autoMapped[field]);
 
       if (allMapped) {
         // Auto-mapping successful, normalize data immediately
-        applyMappingsAndNormalize(autoMapped, data);
-        addLog(`✓ Loaded: ${result.name} (${data.length} rows) - Auto-mapped columns`);
+        // In single PDF mode, we'll assign the PDF filename later when PDF is uploaded
+        applyMappingsAndNormalize(autoMapped, parseResult.data, !hasSourceFile);
+        addLog(`✓ Loaded: ${result.name} (${parseResult.rowCount} pages) - Auto-mapped columns`);
+
+        if (!hasSourceFile) {
+          addLog(`ℹ️  Single PDF mode: Upload one PDF and it will be used for all pages`);
+        }
       } else {
         // Show mapping modal for user to confirm/adjust
         setCurrentMappings(autoMapped);
@@ -142,10 +174,27 @@ export default function App() {
   };
 
   // Apply mappings and normalize data
-  const applyMappingsAndNormalize = (mappings, data) => {
-    const normalizedData = data
-      .map(row => normalizeRowWithCustomMappings(row, mappings))
-      .filter(r => r.source_file); // Remove rows without source file
+  const applyMappingsAndNormalize = (mappings, data, isSinglePdfMode = false) => {
+    setSinglePdfMode(isSinglePdfMode);
+
+    let normalizedData;
+
+    if (isSinglePdfMode) {
+      // Single PDF mode: Don't filter by source_file (will be added when PDF is uploaded)
+      normalizedData = data.map(row => {
+        const normalized = normalizeRowWithCustomMappings(row, mappings);
+        // Set temporary source_file to prevent filtering
+        if (!normalized.source_file) {
+          normalized.source_file = '__PENDING__';
+        }
+        return normalized;
+      });
+    } else {
+      // Normal mode: Filter rows without source_file
+      normalizedData = data
+        .map(row => normalizeRowWithCustomMappings(row, mappings))
+        .filter(r => r.source_file);
+    }
 
     setExcelData(normalizedData);
     setCurrentMappings(mappings);
@@ -172,7 +221,22 @@ export default function App() {
     });
 
     setSourceFiles(newFiles);
-    addLog(`✓ Added ${results.length} PDF(s)`);
+
+    // Single PDF mode: Auto-assign PDF filename to all rows
+    if (singlePdfMode && results.length === 1 && excelData.length > 0) {
+      const pdfFilename = results[0].name;
+      const updatedData = excelData.map(row => ({
+        ...row,
+        source_file: row.source_file === '__PENDING__' ? pdfFilename : row.source_file
+      }));
+      setExcelData(updatedData);
+      addLog(`✓ Single PDF mode: Assigned "${pdfFilename}" to all ${updatedData.length} pages`);
+    } else if (singlePdfMode && results.length > 1) {
+      addLog(`⚠️  Warning: In single PDF mode, expected 1 PDF but got ${results.length}`);
+      addLog(`✓ Added ${results.length} PDF(s)`);
+    } else {
+      addLog(`✓ Added ${results.length} PDF(s)`);
+    }
   };
 
   // Process documents
@@ -245,9 +309,13 @@ export default function App() {
     setStats({});
     setLogs([]);
     setCurrentMappings(null);
+    setSinglePdfMode(false);
   };
 
-  const matchedRows = excelData.filter(row => sourceFiles[row.source_file]).length;
+  // Calculate matched rows (handle single PDF mode with __PENDING__)
+  const matchedRows = excelData.filter(row =>
+    sourceFiles[row.source_file] || (singlePdfMode && row.source_file === '__PENDING__')
+  ).length;
 
   // Render
   return (
