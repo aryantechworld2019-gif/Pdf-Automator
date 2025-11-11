@@ -1,12 +1,16 @@
 /**
- * PDF Processor Service with Performance Optimization
+ * PDF Processor Service with LARGE PDF OPTIMIZATION
  * Handles large-scale PDF processing (50k+ files)
- * Features: Batching, streaming, memory management, parallel processing
+ * NEW: PDF Caching for multi-page PDFs (5000+ pages)
+ * Features: Batching, streaming, memory management, parallel processing, PDF caching
  */
 
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import { APP_CONFIG } from '../config/appConfig';
 import { getPdfColor } from '../config/styleConfig';
+
+// PDF Cache for loaded documents (avoids reloading large PDFs)
+const pdfCache = new Map();
 
 /**
  * Process documents in batches for performance
@@ -27,6 +31,7 @@ export async function processDocumentsBatched(groups, sourceFiles, config, progr
 
   logCallback('📊 Using optimized batch processing for large datasets');
   logCallback(`⚙️ Batch size: ${batchSize}, Max concurrent: ${maxConcurrent}`);
+  logCallback('🔥 PDF Caching enabled for large multi-page PDFs');
 
   // Process groups in batches
   for (let i = 0; i < groupKeys.length; i += maxConcurrent) {
@@ -38,12 +43,16 @@ export async function processDocumentsBatched(groups, sourceFiles, config, progr
       logCallback(`📄 Processing: ${key} (${groupRows.length} pages)`);
 
       try {
+        // Clear PDF cache before processing each group to manage memory
+        clearPdfCache();
+
         const pdfBytes = await processGroup(
           key,
           groupRows,
           sourceFiles,
           config,
-          globalBatesCounter
+          globalBatesCounter,
+          logCallback
         );
 
         globalBatesCounter += groupRows.length;
@@ -54,6 +63,10 @@ export async function processDocumentsBatched(groups, sourceFiles, config, progr
         progressCallback(progress);
 
         logCallback(`✓ Completed: ${key}`);
+
+        // Clear cache after each group
+        clearPdfCache();
+
         return { key, pdfBytes };
 
       } catch (error) {
@@ -76,19 +89,63 @@ export async function processDocumentsBatched(groups, sourceFiles, config, progr
     }
   }
 
+  // Final cleanup
+  clearPdfCache();
+
   return processedPDFs;
 }
 
 /**
- * Process a single group of documents
+ * Clear PDF cache to free memory
+ */
+function clearPdfCache() {
+  pdfCache.clear();
+}
+
+/**
+ * Load and cache a PDF document
+ * @param {string} fileName - Source file name
+ * @param {Object} sourceFile - Source file object
+ * @param {Function} logCallback - Logging callback
+ * @returns {Promise<PDFDocument>} Loaded PDF document
+ */
+async function loadPdfWithCache(fileName, sourceFile, logCallback) {
+  // Check cache first
+  if (pdfCache.has(fileName)) {
+    return pdfCache.get(fileName);
+  }
+
+  // Load PDF from base64
+  const binaryString = atob(sourceFile.data);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+
+  const sourcePdfDoc = await PDFDocument.load(bytes);
+  const pageCount = sourcePdfDoc.getPageCount();
+
+  // Cache the loaded PDF
+  pdfCache.set(fileName, sourcePdfDoc);
+
+  if (pageCount > 1000) {
+    logCallback(`   📚 Cached large PDF: ${fileName} (${pageCount} pages)`);
+  }
+
+  return sourcePdfDoc;
+}
+
+/**
+ * Process a single group of documents with PDF caching
  * @param {string} groupKey - Group identifier
  * @param {Array} groupRows - Document rows
  * @param {Object} sourceFiles - Source files
  * @param {Object} config - Configuration
  * @param {number} startBatesNumber - Starting Bates number
+ * @param {Function} logCallback - Logging callback
  * @returns {Promise<Uint8Array>} PDF bytes
  */
-async function processGroup(groupKey, groupRows, sourceFiles, config, startBatesNumber) {
+async function processGroup(groupKey, groupRows, sourceFiles, config, startBatesNumber, logCallback) {
   const mergedPdf = await PDFDocument.create();
   const font = await mergedPdf.embedFont(StandardFonts.Helvetica);
   const boldFont = await mergedPdf.embedFont(StandardFonts.HelveticaBold);
@@ -98,6 +155,12 @@ async function processGroup(groupKey, groupRows, sourceFiles, config, startBates
   // Sort rows
   const sortedRows = sortRows(groupRows, config);
 
+  // Analyze source files for optimization strategy
+  const sourceFileStats = analyzeSourceFiles(sortedRows);
+  if (sourceFileStats.hasLargePdfs) {
+    logCallback(`   🔧 Optimizing for large PDFs (max ${sourceFileStats.maxPages} pages)`);
+  }
+
   // Process each page in chunks to manage memory
   const chunkSize = APP_CONFIG.processing.performance.chunkSize;
 
@@ -105,17 +168,24 @@ async function processGroup(groupKey, groupRows, sourceFiles, config, startBates
     const chunk = sortedRows.slice(i, i + chunkSize);
 
     for (const row of chunk) {
-      await processPage(
+      await processPageWithCache(
         mergedPdf,
         row,
         sourceFiles,
         config,
         currentBatesNumber,
         font,
-        boldFont
+        boldFont,
+        logCallback
       );
 
       currentBatesNumber++;
+    }
+
+    // Log progress for large groups
+    if (sortedRows.length > 500 && (i + chunkSize) % 500 === 0) {
+      const processed = Math.min(i + chunkSize, sortedRows.length);
+      logCallback(`   ⏳ Progress: ${processed}/${sortedRows.length} pages`);
     }
   }
 
@@ -126,7 +196,39 @@ async function processGroup(groupKey, groupRows, sourceFiles, config, startBates
 }
 
 /**
- * Process a single page
+ * Analyze source files to determine optimization strategy
+ * @param {Array} rows - Document rows
+ * @returns {Object} Statistics
+ */
+function analyzeSourceFiles(rows) {
+  const fileUsage = new Map();
+
+  rows.forEach(row => {
+    const count = fileUsage.get(row.source_file) || 0;
+    fileUsage.set(row.source_file, count + 1);
+  });
+
+  const stats = {
+    uniqueFiles: fileUsage.size,
+    totalPages: rows.length,
+    maxUsage: Math.max(...Array.from(fileUsage.values())),
+    hasLargePdfs: false,
+    maxPages: 0
+  };
+
+  // Estimate if we have large PDFs
+  fileUsage.forEach((count, fileName) => {
+    if (count > 100) {
+      stats.hasLargePdfs = true;
+      stats.maxPages = Math.max(stats.maxPages, count);
+    }
+  });
+
+  return stats;
+}
+
+/**
+ * Process a single page with PDF caching
  * @param {PDFDocument} mergedPdf - Target PDF document
  * @param {Object} row - Row data
  * @param {Object} sourceFiles - Source files
@@ -134,26 +236,21 @@ async function processGroup(groupKey, groupRows, sourceFiles, config, startBates
  * @param {number} batesNumber - Current Bates number
  * @param {Object} font - Regular font
  * @param {Object} boldFont - Bold font
+ * @param {Function} logCallback - Logging callback
  */
-async function processPage(mergedPdf, row, sourceFiles, config, batesNumber, font, boldFont) {
+async function processPageWithCache(mergedPdf, row, sourceFiles, config, batesNumber, font, boldFont, logCallback) {
   const sourceFile = sourceFiles[row.source_file];
 
   if (!sourceFile) {
     throw new Error(`Source file not found: ${row.source_file}`);
   }
 
-  // Load source PDF
-  const binaryString = atob(sourceFile.data);
-  const bytes = new Uint8Array(binaryString.length);
-  for (let i = 0; i < binaryString.length; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
-  }
-
-  const sourcePdfDoc = await PDFDocument.load(bytes);
+  // Load PDF with caching (HUGE performance improvement for large PDFs!)
+  const sourcePdfDoc = await loadPdfWithCache(row.source_file, sourceFile, logCallback);
   const pageIndex = parseInt(row.page_number) - 1;
 
   if (pageIndex < 0 || pageIndex >= sourcePdfDoc.getPageCount()) {
-    throw new Error(`Invalid page number ${row.page_number} in ${row.source_file}`);
+    throw new Error(`Invalid page number ${row.page_number} in ${row.source_file} (PDF has ${sourcePdfDoc.getPageCount()} pages)`);
   }
 
   // Copy page
@@ -386,8 +483,21 @@ function determineGroupKey(row, groupBy) {
   }
 }
 
+/**
+ * Get PDF cache statistics
+ * @returns {Object} Cache stats
+ */
+export function getPdfCacheStats() {
+  return {
+    size: pdfCache.size,
+    files: Array.from(pdfCache.keys())
+  };
+}
+
 export default {
   processDocumentsBatched,
   groupDocuments,
-  sortRows
+  sortRows,
+  clearPdfCache,
+  getPdfCacheStats
 };
