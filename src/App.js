@@ -30,7 +30,8 @@ export default function App() {
   // State
   const [activeStep, setActiveStep] = useState(1);
   const [excelFile, setExcelFile] = useState(null);
-  const [rawExcelData, setRawExcelData] = useState([]); // Raw data before normalization
+  const [rawExcelData, setRawExcelData] = useState([]); // Raw data before normalization (for column mapping UI)
+  const [expandedExcelData, setExpandedExcelData] = useState([]); // Expanded data (after page range expansion)
   const [excelData, setExcelData] = useState([]); // Normalized data
   const [sourceFiles, setSourceFiles] = useState({});
   const [config, setConfig] = useState(loadSettings());
@@ -122,8 +123,10 @@ export default function App() {
         return;
       }
 
-      // Store raw data (before expansion)
+      // Store raw data (before expansion) for column mapping UI
       setRawExcelData(rawData);
+      // Store expanded data (after page range expansion) for processing
+      setExpandedExcelData(parseResult.data);
       setExcelFile({ name: result.name });
 
       // Show range expansion info
@@ -220,8 +223,10 @@ export default function App() {
 
   // Handle mapping confirmation from modal
   const handleMappingsConfirmed = (mappings) => {
-    applyMappingsAndNormalize(mappings, rawExcelData);
-    addLog(`✓ Column mapping applied (${rawExcelData.length} rows)`);
+    // Use expanded data (after page range expansion), not raw data
+    const dataToUse = expandedExcelData.length > 0 ? expandedExcelData : rawExcelData;
+    applyMappingsAndNormalize(mappings, dataToUse);
+    addLog(`✓ Column mapping applied (${dataToUse.length} pages)`);
   };
 
   const handlePdfUpload = async () => {
@@ -340,6 +345,7 @@ export default function App() {
   const resetApp = () => {
     setActiveStep(1);
     setRawExcelData([]);
+    setExpandedExcelData([]);
     setExcelData([]);
     setExcelFile(null);
     setSourceFiles({});
