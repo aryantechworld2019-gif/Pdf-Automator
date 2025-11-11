@@ -1,19 +1,23 @@
 /**
  * Main Application - Refactored & Optimized
  * Handles 50k+ files with performance optimizations
+ * NEW: Dynamic Excel column mapping
  */
 
 import React, { useState, useEffect } from 'react';
-import { Upload, Settings as SettingsIcon, Play, TrendingUp } from 'lucide-react';
+import { Upload, Settings as SettingsIcon, Play, TrendingUp, Map as MapIcon } from 'lucide-react';
 
 // Services
 import { parseExcelFile } from './services/excelParser';
 import { processDocumentsBatched, groupDocuments } from './services/pdfProcessor';
 import { createZipArchive, saveZipFile, generateDefaultFilename } from './services/fileWriter';
 import { loadSettings, saveSettings } from './services/settingsManager';
+import { normalizeRowWithCustomMappings, autoMapColumns, detectExcelColumns } from './services/columnMapper';
+import * as XLSX from 'xlsx';
 
 // Components
 import { Card, Button, Badge, ProgressBar } from './components';
+import ColumnMappingModal from './components/ColumnMappingModal';
 
 // Configuration
 import { APP_CONFIG } from './config/appConfig';
@@ -26,7 +30,8 @@ export default function App() {
   // State
   const [activeStep, setActiveStep] = useState(1);
   const [excelFile, setExcelFile] = useState(null);
-  const [excelData, setExcelData] = useState([]);
+  const [rawExcelData, setRawExcelData] = useState([]); // Raw data before normalization
+  const [excelData, setExcelData] = useState([]); // Normalized data
   const [sourceFiles, setSourceFiles] = useState({});
   const [config, setConfig] = useState(loadSettings());
   const [processing, setProcessing] = useState(false);
@@ -35,10 +40,51 @@ export default function App() {
   const [resultZip, setResultZip] = useState(null);
   const [stats, setStats] = useState({});
 
+  // Column mapping state
+  const [showMappingModal, setShowMappingModal] = useState(false);
+  const [currentMappings, setCurrentMappings] = useState(null);
+
   // Auto-save settings
   useEffect(() => {
     saveSettings(config);
   }, [config]);
+
+  // Calculate stats when data changes
+  const calculateStats = (data) => {
+    const stats = {
+      totalDocs: data.length,
+      totalValue: 0,
+      categories: new Set(),
+      assetClasses: new Set(),
+      counterparties: new Set(),
+      priorities: new Map(),
+      dateRange: { min: null, max: null }
+    };
+
+    data.forEach(row => {
+      if (row.value && !isNaN(row.value)) {
+        stats.totalValue += row.value;
+      }
+      if (row.type) stats.categories.add(row.type);
+      if (row.asset_class) stats.assetClasses.add(row.asset_class);
+      if (row.counterparty) stats.counterparties.add(row.counterparty);
+
+      const priority = row.priority || 'normal';
+      stats.priorities.set(priority, (stats.priorities.get(priority) || 0) + 1);
+
+      const docDate = new Date(row.date);
+      if (!isNaN(docDate)) {
+        if (!stats.dateRange.min || docDate < stats.dateRange.min) {
+          stats.dateRange.min = docDate;
+        }
+        if (!stats.dateRange.max || docDate > stats.dateRange.max) {
+          stats.dateRange.max = docDate;
+        }
+      }
+    });
+
+    return stats;
+  };
 
   // File upload handlers
   const handleExcelUpload = async () => {
@@ -47,15 +93,71 @@ export default function App() {
     const result = await window.electronAPI.openExcelDialog();
     if (!result) return;
 
-    const parsed = await parseExcelFile(result.data, result.name);
-    if (parsed.success) {
-      setExcelData(parsed.data);
+    try {
+      // Parse raw Excel data
+      const binaryString = atob(result.data);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+
+      const wb = XLSX.read(bytes, { type: 'array' });
+      const wsname = wb.SheetNames[0];
+      const ws = wb.Sheets[wsname];
+      const data = XLSX.utils.sheet_to_json(ws);
+
+      if (data.length === 0) {
+        addLog('❌ Error: Excel file is empty');
+        return;
+      }
+
+      // Store raw data
+      setRawExcelData(data);
       setExcelFile({ name: result.name });
-      setStats(parsed.stats);
-      addLog(`✓ Loaded: ${result.name} (${parsed.rowCount} rows)`);
-    } else {
-      addLog(`❌ Error: ${parsed.error}`);
+
+      // Try auto-mapping
+      const firstRow = data[0];
+      const columns = detectExcelColumns(firstRow);
+      const autoMapped = autoMapColumns(columns);
+
+      // If all required fields are auto-mapped, proceed directly
+      const requiredFields = ['sourceFile', 'pageNumber', 'date', 'type'];
+      const allMapped = requiredFields.every(field => autoMapped[field]);
+
+      if (allMapped) {
+        // Auto-mapping successful, normalize data immediately
+        applyMappingsAndNormalize(autoMapped, data);
+        addLog(`✓ Loaded: ${result.name} (${data.length} rows) - Auto-mapped columns`);
+      } else {
+        // Show mapping modal for user to confirm/adjust
+        setCurrentMappings(autoMapped);
+        setShowMappingModal(true);
+        addLog(`⚙️  Please map your Excel columns...`);
+      }
+
+    } catch (err) {
+      console.error(err);
+      addLog(`❌ Error parsing Excel file: ${err.message}`);
     }
+  };
+
+  // Apply mappings and normalize data
+  const applyMappingsAndNormalize = (mappings, data) => {
+    const normalizedData = data
+      .map(row => normalizeRowWithCustomMappings(row, mappings))
+      .filter(r => r.source_file); // Remove rows without source file
+
+    setExcelData(normalizedData);
+    setCurrentMappings(mappings);
+
+    const newStats = calculateStats(normalizedData);
+    setStats(newStats);
+  };
+
+  // Handle mapping confirmation from modal
+  const handleMappingsConfirmed = (mappings) => {
+    applyMappingsAndNormalize(mappings, rawExcelData);
+    addLog(`✓ Column mapping applied (${rawExcelData.length} rows)`);
   };
 
   const handlePdfUpload = async () => {
@@ -135,13 +237,17 @@ export default function App() {
   // Reset app
   const resetApp = () => {
     setActiveStep(1);
+    setRawExcelData([]);
     setExcelData([]);
     setExcelFile(null);
     setSourceFiles({});
     setResultZip(null);
     setStats({});
     setLogs([]);
+    setCurrentMappings(null);
   };
+
+  const matchedRows = excelData.filter(row => sourceFiles[row.source_file]).length;
 
   // Render
   return (
@@ -175,7 +281,21 @@ export default function App() {
                   <Upload className="w-8 h-8 text-indigo-600" />
                   <h3 className="font-semibold">{LABELS.uploadStep.excel.title}</h3>
                   <Button onClick={handleExcelUpload}>{LABELS.uploadStep.excel.buttonSelect}</Button>
-                  {excelFile && <Badge variant="success">✓ {excelFile.name}</Badge>}
+                  {excelFile && (
+                    <div className="space-y-2">
+                      <Badge variant="success">✓ {excelFile.name}</Badge>
+                      {currentMappings && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setShowMappingModal(true)}
+                          icon={MapIcon}
+                        >
+                          Adjust Mapping
+                        </Button>
+                      )}
+                    </div>
+                  )}
                 </div>
               </Card>
 
@@ -193,16 +313,24 @@ export default function App() {
 
             {excelData.length > 0 && (
               <Card className="p-4">
-                <p className="text-sm text-slate-600">
-                  Loaded {excelData.length} documents, {Object.keys(sourceFiles).length} PDFs
-                </p>
+                <div className="flex justify-between items-center">
+                  <p className="text-sm text-slate-600">
+                    Loaded {excelData.length} documents • {Object.keys(sourceFiles).length} PDFs • {matchedRows} matched
+                  </p>
+                  {currentMappings && (
+                    <Badge variant="info">
+                      <MapIcon className="w-3 h-3 inline mr-1" />
+                      Custom Mapping Active
+                    </Badge>
+                  )}
+                </div>
               </Card>
             )}
 
             <div className="flex justify-end">
               <Button
                 onClick={() => setActiveStep(2)}
-                disabled={!excelFile || Object.keys(sourceFiles).length === 0}
+                disabled={!excelFile || Object.keys(sourceFiles).length === 0 || excelData.length === 0}
               >
                 Configure Settings →
               </Button>
@@ -223,7 +351,7 @@ export default function App() {
                     type="text"
                     value={config.batesPrefix}
                     onChange={(e) => setConfig({...config, batesPrefix: e.target.value})}
-                    className="w-full rounded-md border-slate-300 p-2"
+                    className="w-full rounded-md border-slate-300 p-2 border"
                   />
                 </div>
 
@@ -232,7 +360,7 @@ export default function App() {
                   <select
                     value={config.groupBy}
                     onChange={(e) => setConfig({...config, groupBy: e.target.value})}
-                    className="w-full rounded-md border-slate-300 p-2"
+                    className="w-full rounded-md border-slate-300 p-2 border"
                   >
                     {APP_CONFIG.processing.groupingStrategies.map(strategy => (
                       <option key={strategy.id} value={strategy.id}>{strategy.label}</option>
@@ -278,6 +406,14 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* Column Mapping Modal */}
+      <ColumnMappingModal
+        isOpen={showMappingModal}
+        onClose={() => setShowMappingModal(false)}
+        firstRow={rawExcelData[0]}
+        onMappingsConfirmed={handleMappingsConfirmed}
+      />
     </div>
   );
 }
