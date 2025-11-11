@@ -14,8 +14,8 @@ const CUSTOM_MAPPINGS_KEY = 'custom_column_mappings_v1';
 export const FIELD_DEFINITIONS = {
   sourceFile: {
     label: 'Source File Name',
-    description: 'The PDF filename (e.g., "document.pdf")',
-    required: true,
+    description: 'The PDF filename (optional for single PDF mode)',
+    required: false,
     example: 'contract_001.pdf',
     defaultNames: COLUMN_MAPPINGS.sourceFile
   },

@@ -251,9 +251,8 @@ export function normalizeRow(row) {
 export function validateRow(row) {
   const errors = [];
 
-  if (!row.source_file || row.source_file.trim() === '') {
-    errors.push('Missing source file name');
-  }
+  // Source file is optional for single PDF mode (will be assigned when PDF is uploaded)
+  // No validation needed - can be missing, empty, or "__PENDING__"
 
   if (!row.page_number || row.page_number < 1) {
     errors.push('Invalid page number (must be >= 1)');
